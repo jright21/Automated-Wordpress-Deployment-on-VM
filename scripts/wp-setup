@@ -1,0 +1,93 @@
+#!/bin/bash
+
+# Exit script if any command fails
+set -e
+
+# Set up sudo password helper
+export SUDO_ASKPASS=/usr/local/bin/askpass-helper
+
+# Ask for domain name if not provided
+if [ -z "$1" ]; then
+  read -p "Enter the domain name (e.g., site.local): " DOMAIN
+else
+  DOMAIN=$1
+fi
+
+# Define variables dynamically
+WEB_ROOT="/var/www/$DOMAIN/public_html"
+DB_NAME="${DOMAIN//./_}_db"
+VM_IP=$(hostname -I | awk '{print $1}')  # Get the VM's primary IP
+DB_USER="localwpuser"
+DB_PASS="LocalWp@ssword123!"
+
+echo " Starting automation for $DOMAIN"
+
+# Step 1: Create Directory for WordPress Site
+echo " Creating directory structure..."
+sudo -A mkdir -p $WEB_ROOT
+sudo -A chown -R www-data:www-data $WEB_ROOT
+sudo -A chmod -R 755 $WEB_ROOT
+
+# Step 2: Create Apache Virtual Host
+echo " Creating Apache Virtual Host for $DOMAIN..."
+
+TEMP_CONF="/tmp/$DOMAIN.conf"
+cat <<EOL > $TEMP_CONF
+<VirtualHost *:80>
+    ServerAdmin admin@$DOMAIN
+    ServerName $DOMAIN
+    ServerAlias www.$DOMAIN
+    DocumentRoot /var/www/$DOMAIN/public_html
+
+    <Directory /var/www/$DOMAIN/public_html>
+        AllowOverride All
+        Require all granted
+    </Directory>
+
+    ErrorLog \${APACHE_LOG_DIR}/$DOMAIN-error.log
+    CustomLog \${APACHE_LOG_DIR}/$DOMAIN-access.log combined
+</VirtualHost>
+EOL
+
+# Move the Config File to `/etc/apache2/sites-available/` Using `sudo`
+sudo -A mv "$TEMP_CONF" "/etc/apache2/sites-available/$DOMAIN.conf"
+#sudo -A /usr/local/bin/move-conf.sh "$DOMAIN.conf"
+
+# Step 3: Enable the new Virtual Host and Restart Apache
+echo " Enabling site and restarting Apache..."
+sudo -A a2ensite $DOMAIN.conf
+sudo -A systemctl restart apache2
+
+# Step 4: Add Domain to /etc/hosts
+echo " Updating /etc/hosts..."
+sudo -A bash -c "echo '$VM_IP  $DOMAIN' >> /etc/hosts"
+
+# Step 5: Set Up MySQL Database and User
+echo " Creating MySQL Database & User..."
+sudo -A mysql -u root <<MYSQL_SCRIPT
+DROP DATABASE IF EXISTS $DB_NAME;
+CREATE DATABASE $DB_NAME;
+DROP USER IF EXISTS '$DB_USER'@'localhost';
+CREATE USER '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';
+GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';
+FLUSH PRIVILEGES;
+MYSQL_SCRIPT
+
+# Step 6: Install WordPress Using WP-CLI
+echo " Downloading and installing WordPress for $DOMAIN..."
+mkdir -p $WEB_ROOT
+cd $WEB_ROOT || exit 1
+
+sudo -A -u www-data wp core download --allow-root
+sudo -A -u www-data wp config create --dbname=$DB_NAME --dbuser=$DB_USER --dbpass=$DB_PASS --dbhost=localhost --allow-root
+sudo -A -u www-data wp core install --url="http://$DOMAIN" --title="Automated WP Setup" --admin_user="admin" --admin_password="Admin@123!" --admin_email="admin@$DOMAIN" --allow-root
+
+echo " WordPress installation completed!"
+
+# Step 7: Set Correct Permissions
+echo " Setting permissions..."
+sudo -A chown -R www-data:www-data /var/www/$DOMAIN
+sudo -A chmod -R 755 /var/www/$DOMAIN
+
+echo " Automation for $DOMAIN completed!"
+
